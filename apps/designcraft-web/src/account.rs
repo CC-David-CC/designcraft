@@ -308,6 +308,11 @@ impl AccountHost {
                 }
             }
             "links.relink" if object.len() == 1 && object.get("asset").and_then(Value::as_u64).is_some() => app.run("links.relink", args),
+            "pdf.export" if object.is_empty() => {
+                let title = state.title();
+                let name = std::path::Path::new(&title).file_stem().and_then(|name| name.to_str()).unwrap_or("Publication");
+                app.run("app.exportPdf", json!({"path":format!("{name}.pdf")}))
+            }
             "edit.undo" if object.is_empty() => app.run("edit.undo", json!({})),
             _ => Err("Unsupported DesignCraft document operation.".into()),
         }
