@@ -398,7 +398,7 @@ impl AccountHost {
         Ok(())
     }
 
-    fn dialog_result(&mut self, app: &DesignApp, packet: &JsValue) -> Result<(), String> {
+    fn dialog_result(&mut self, app: &mut DesignApp, packet: &JsValue) -> Result<(), String> {
         if self.dialog.as_ref().map(|dialog| dialog.id) != number(packet, "requestId") {
             return Ok(());
         }
