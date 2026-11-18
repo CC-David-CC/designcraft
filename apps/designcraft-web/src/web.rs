@@ -389,9 +389,9 @@ impl eframe::App for WebShell {
         let _ = graphics.run_if_healthy(|| {
             if let Some(account) = &mut self.account {
                 account.poll(&mut self.app);
-            }
-            if self.account.is_some() && self.app.session.active().is_none() {
-                return;
+                if account.suspended() || self.app.session.active().is_none() {
+                    return;
+                }
             }
             self.app.logic(ctx);
             if let Some(account) = &mut self.account
@@ -404,8 +404,9 @@ impl eframe::App for WebShell {
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         let _ = self.graphics.run_if_healthy(|| {
-            if self.account.is_some() && self.app.session.active().is_none() {
+            if self.account.as_ref().is_some_and(|account| account.suspended() || self.app.session.active().is_none()) {
                 raw.dropped_files.clear();
+                raw.events.clear();
                 return;
             }
             // Dropped files belong to this host iteration's raw input, not to stale logic input:
@@ -447,7 +448,7 @@ impl eframe::App for WebShell {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if self.account.is_none() || self.app.session.active().is_some() {
+        if self.account.as_ref().is_none_or(|account| !account.suspended() && self.app.session.active().is_some()) {
             let _ = self.graphics.run_if_healthy(|| self.app.ui(ui));
         }
     }

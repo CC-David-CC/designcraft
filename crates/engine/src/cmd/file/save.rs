@@ -22,7 +22,7 @@ impl Session {
     /// Capture an editable native draft without a destination or a recent-files preview.
     pub fn account_recovery_snapshot(&self) -> Result<Vec<u8>> {
         let state = self.doc()?;
-        if state.interaction.is_some() || state.preview_stash.is_some() {
+        if self.tool_composing() || state.interaction.is_some() || state.preview_stash.is_some() {
             return Err(bad("file.save", "finish the active edit or data merge preview before capturing a draft"));
         }
         super::to_bytes(&state.doc)
@@ -35,7 +35,7 @@ impl Session {
             return Err(bad("file.save", "choose an account-relative .designcraft path"));
         }
         let state = self.doc()?;
-        if state.interaction.is_some() || state.preview_stash.is_some() {
+        if self.tool_composing() || state.interaction.is_some() || state.preview_stash.is_some() {
             return Err(bad("file.save", "finish the active edit or data merge preview before saving"));
         }
         let document = state.doc.clone();
