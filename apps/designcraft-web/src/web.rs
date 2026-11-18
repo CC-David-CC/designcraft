@@ -1,6 +1,7 @@
 //! The browser shell: web `Services`, drag-and-drop, and the eframe web runner.
 
 use super::browser_policy::{has_query_flag, mime_for};
+use crate::account::{AccountHost, Parent};
 use crate::graphics::{GraphicsState, RecoveryDocument, recovery_documents};
 use designcraft_engine::Session;
 use designcraft_ui_egui::{DesignApp, ImportRequest, ImportedFile, Inbox, Services};
@@ -46,6 +47,20 @@ pub fn start() {
             return;
         }
         let graphics = GraphicsState::default();
+        let query_string = query();
+        let account_mode = form_urlencoded::parse(query_string.trim_start_matches('?').as_bytes())
+            .any(|(key, value)| key == "host" && value == "webos-account");
+        let parent = if account_mode {
+            match Parent::connect() {
+                Ok(parent) => Some(parent),
+                Err(error) => {
+                    graphics_failed(&graphics, "DesignCraft failed to start", "Open the editor from WebOS.", &error);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let Some(canvas) = document.get_element_by_id(CANVAS_ID).and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok()) else {
             graphics_failed(&graphics, "DesignCraft failed to start", "Reload this page to try again.", &format!("Missing canvas {CANVAS_ID}."));
             return;
@@ -58,6 +73,7 @@ pub fn start() {
         }
         let runner = eframe::WebRunner::new();
         let creator_graphics = graphics.clone();
+        let creator_parent = parent.clone();
         let result = runner
             .start(
                 canvas.clone(),
@@ -72,16 +88,26 @@ pub fn start() {
                         });
                     }
                     let inbox: Inbox = Inbox::default();
+                    let account = creator_parent
+                        .map(|endpoint| AccountHost::install(endpoint, cc.egui_ctx.clone()))
+                        .transpose()
+                        .map_err(std::io::Error::other)?;
                     let mut app = DesignApp::new(Session::new(), services(inbox.clone(), cc.egui_ctx.clone()));
-                    if has_query_flag(&query(), "sample") {
+                    if account.is_none() && has_query_flag(&query(), "sample") {
                         let _ = app.run("file.newSample", serde_json::json!({}));
                     }
-                    Ok(Box::new(WebShell { app, inbox, read_errors: Default::default(), graphics: creator_graphics }))
+                    Ok(Box::new(WebShell { app, inbox, read_errors: Default::default(), graphics: creator_graphics, account }))
                 }),
             )
             .await;
         match result {
             Ok(()) => {
+                if let Some(parent) = &parent
+                    && let Err(error) = parent.ready(None)
+                {
+                    graphics_failed(&graphics, "DesignCraft failed to start", "Reopen the editor from WebOS.", &error);
+                    return;
+                }
                 if let Err(e) = install_recovery_controls(&runner, &canvas, &graphics) {
                     graphics_failed(&graphics, GRAPHICS_TITLE, GRAPHICS_MESSAGE, &format!("Couldn't install graphics recovery controls: {e:?}"));
                     if let Some(shell) = runner.app_mut::<WebShell>()
@@ -98,6 +124,9 @@ pub fn start() {
                 }
             }
             Err(e) => {
+                if let Some(parent) = &parent {
+                    let _ = parent.ready(Some("DesignCraft's native renderer failed to start."));
+                }
                 graphics_failed(
                     &graphics,
                     "DesignCraft failed to start",
@@ -347,6 +376,7 @@ struct WebShell {
     /// Why a dropped file couldn't be read, for the status bar (the read finishes outside a frame).
     read_errors: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     graphics: GraphicsState,
+    account: Option<AccountHost>,
 }
 
 impl eframe::App for WebShell {
@@ -356,11 +386,28 @@ impl eframe::App for WebShell {
         if let Some(error) = errors.into_iter().last() {
             self.app.status(error);
         }
-        let _ = graphics.run_if_healthy(|| self.app.logic(ctx));
+        let _ = graphics.run_if_healthy(|| {
+            if let Some(account) = &mut self.account {
+                account.poll(&mut self.app);
+            }
+            if self.account.is_some() && self.app.session.active().is_none() {
+                return;
+            }
+            self.app.logic(ctx);
+            if let Some(account) = &mut self.account
+                && let Err(error) = account.publish_state(&self.app)
+            {
+                self.app.status(error);
+            }
+        });
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         let _ = self.graphics.run_if_healthy(|| {
+            if self.account.is_some() && self.app.session.active().is_none() {
+                raw.dropped_files.clear();
+                return;
+            }
             // Dropped files belong to this host iteration's raw input, not to stale logic input:
             // read them here once, before the batch is saved as pending for a hidden pass.
             // Files dropped together arrive together, in their order, so several images load the
@@ -400,7 +447,9 @@ impl eframe::App for WebShell {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let _ = self.graphics.run_if_healthy(|| self.app.ui(ui));
+        if self.account.is_none() || self.app.session.active().is_some() {
+            let _ = self.graphics.run_if_healthy(|| self.app.ui(ui));
+        }
     }
 
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {

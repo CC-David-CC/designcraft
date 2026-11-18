@@ -79,8 +79,14 @@ impl DesignApp {
     }
 
     /// Adopt a verified account publication and initialize the existing native editor state.
-    pub fn open_account_document(&mut self, path: &str, bytes: &[u8]) -> Result<Vec<String>, String> {
-        let warnings = self.session.open_account_document(path, bytes).map_err(|error| error.to_string())?;
+    pub fn adopt_account_document(&mut self, path: Option<&str>, bytes: &[u8], recover: bool) -> Result<Vec<String>, String> {
+        let warnings = if recover {
+            self.session.restore_account_draft(path, bytes)
+        } else {
+            let path = path.ok_or("An account publication needs a path.")?;
+            self.session.open_account_document(path, bytes)
+        }
+        .map_err(|error| error.to_string())?;
         self.after_engine();
         self.check_opened_document_fonts();
         Ok(warnings)
