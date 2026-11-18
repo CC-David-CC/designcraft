@@ -23,6 +23,7 @@ pub(crate) use open::load_document_fonts;
 pub use open::{RecentPreview, recent_preview};
 pub(crate) use place::{crop_pdf, crop_pdf_from, document_of, prepare_placed, read_source, validate_placement};
 pub use registry::specs;
+pub use save::PreparedAccountSave;
 pub(crate) use snippets::{snippet_bytes, snippet_place};
 
 #[cfg(test)]

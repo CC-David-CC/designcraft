@@ -9,6 +9,51 @@ use super::open::load_document_fonts;
 use super::place::image_place_tests;
 use super::{Arc, EngineError, Result, Session, Value, bad, json, str_param};
 
+/// An immutable document snapshot awaiting a durable account write receipt.
+pub struct PreparedAccountSave {
+    uid: u64,
+    identity_epoch: u64,
+    revision: u64,
+    document: Arc<designcraft_doc::Document>,
+    path: String,
+}
+
+impl Session {
+    /// Serialize the current native document without rebasing linked assets against a local
+    /// filesystem path. The account host grants the destination and persists these bytes.
+    pub fn prepare_account_save(&self, path: &str) -> Result<(PreparedAccountSave, Vec<u8>)> {
+        if path.len() > 2048
+            || !path.rsplit_once('.').is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("designcraft"))
+            || path.chars().any(|character| character == '\\' || character.is_control())
+            || path.split('/').any(|part| matches!(part, "" | "." | ".."))
+        {
+            return Err(bad("file.save", "choose an account-relative .designcraft path"));
+        }
+        let state = self.doc()?;
+        if state.interaction.is_some() || state.preview_stash.is_some() {
+            return Err(bad("file.save", "finish the active edit or data merge preview before saving"));
+        }
+        let document = state.doc.clone();
+        let bytes = to_bytes_with_preview(&document, &self.cache)?;
+        Ok((
+            PreparedAccountSave { uid: state.uid, identity_epoch: state.identity_epoch, revision: state.revision, document, path: path.to_owned() },
+            bytes,
+        ))
+    }
+
+    /// Apply the receipt to the originating document. Edits after capture stay dirty.
+    pub fn adopt_account_save(&mut self, save: PreparedAccountSave) -> Result<()> {
+        let state = self.doc_mut()?;
+        if state.uid != save.uid || state.identity_epoch != save.identity_epoch || !(state.saved_revision..=state.revision).contains(&save.revision) {
+            return Err(bad("file.save", "the saved revision no longer identifies the open document"));
+        }
+        state.path = Some(save.path);
+        state.saved_revision = save.revision;
+        state.saved_doc = save.document;
+        Ok(())
+    }
+}
+
 pub(super) fn file_save(s: &mut Session, p: &Value) -> Result<Value> {
     let st = s.doc_mut()?;
     // Saving to the document's own file keeps its name, even one opened without the extension.
@@ -164,6 +209,29 @@ mod save_tests {
 
     use crate::Session;
     use crate::cmd::file::FAIL_TO_BYTES;
+
+    #[test]
+    fn account_confirmation_preserves_edits_made_after_capture() {
+        let mut session = Session::new();
+        session.execute("file.new", &json!({})).unwrap();
+        session.execute("frame.create", &json!({"rect":[36,36,300,200],"content":"text","text":"Captured","caret":false})).unwrap();
+        let (prepared, bytes) = session.prepare_account_save("Documents/Publication.designcraft").unwrap();
+        let snapshot = super::from_bytes(&bytes).unwrap();
+        assert!(snapshot.stories.values().any(|story| story.text == "Captured"));
+        assert!(session.doc().unwrap().path.is_none());
+        assert!(session.doc().unwrap().is_dirty());
+        session.execute("frame.create", &json!({"rect":[50,210,300,380],"content":"text","text":"Later","caret":false})).unwrap();
+        session.adopt_account_save(prepared).unwrap();
+        let current = session.doc().unwrap();
+        assert_eq!(current.path.as_deref(), Some("Documents/Publication.designcraft"));
+        assert!(current.is_dirty());
+        assert!(current.doc.stories.values().any(|story| story.text == "Later"));
+        assert!(!current.saved_doc.stories.values().any(|story| story.text == "Later"));
+        let (other, _) = session.prepare_account_save("Documents/Other.designcraft").unwrap();
+        session.execute("file.new", &json!({})).unwrap();
+        assert!(session.adopt_account_save(other).is_err());
+        assert!(session.doc().unwrap().path.is_none());
+    }
 
     /// Saving over an existing document replaces it whole and leaves nothing beside it.
     #[test]
