@@ -1,5 +1,15 @@
 use super::state::{ImportRequest, ImportedFile};
 
+pub enum AccountDocumentRequest {
+    New(serde_json::Value),
+    Open,
+    Save,
+    SaveAs,
+    Close,
+}
+
+pub type AccountDocumentFn = Box<dyn FnMut(AccountDocumentRequest) -> Result<(), String>>;
+
 pub type ReadFn = Box<dyn Fn(&str) -> Result<Vec<u8>, String>>;
 
 pub type WriteFn = Box<dyn FnMut(&str, &[u8]) -> Result<(), String>>;
@@ -57,6 +67,8 @@ pub type Inbox = std::sync::Arc<std::sync::Mutex<Vec<ImportedFile>>>;
 /// app asks for them itself and the host shows them (`DesignApp::show_file_dialogs`).
 #[derive(Default)]
 pub struct Services {
+    /// Hand account document lifecycle actions to the WebOS desktop.
+    pub account_document: Option<AccountDocumentFn>,
     pub read: Option<ReadFn>,
     pub write: Option<WriteFn>,
     /// Asynchronous open dialog for a purpose (`open`, `place`); the chosen file arrives later

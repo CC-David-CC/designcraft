@@ -3,7 +3,7 @@
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use designcraft_engine::cmd::PreparedAccountSave;
-use designcraft_ui_egui::DesignApp;
+use designcraft_ui_egui::{AccountDocumentFn, AccountDocumentRequest, DesignApp};
 use js_sys::{Array, ArrayBuffer, Object, Reflect, Uint8Array};
 use serde_json::{Value, json};
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
@@ -82,12 +82,20 @@ struct Save {
     capture: PreparedAccountSave,
 }
 
+struct Dialog {
+    id: u64,
+    save: Option<(u64, u64)>,
+}
+
 pub(crate) struct AccountHost {
     parent: Parent,
     browser: Window,
     inbox: Rc<RefCell<VecDeque<JsValue>>>,
     listener: Closure<dyn FnMut(MessageEvent)>,
     last_state: Value,
+    action: Rc<RefCell<Option<AccountDocumentRequest>>>,
+    dialog: Option<Dialog>,
+    next_dialog: u64,
     pending: Option<Save>,
     next_ticket: u64,
     lease: Option<String>,
@@ -120,7 +128,22 @@ impl AccountHost {
         browser
             .add_event_listener_with_callback("message", listener.as_ref().unchecked_ref())
             .map_err(|_| "Could not receive WebOS document requests.")?;
-        Ok(Self { parent, browser, inbox, listener, last_state: Value::Null, pending: None, next_ticket: 1, lease: None, finalized: false })
+        Ok(Self {
+            parent, browser, inbox, listener, last_state: Value::Null, action: Rc::default(), dialog: None, next_dialog: 1,
+            pending: None, next_ticket: 1, lease: None, finalized: false,
+        })
+    }
+
+    pub(crate) fn document_service(&self) -> AccountDocumentFn {
+        let action = self.action.clone();
+        Box::new(move |request| {
+            let mut next = action.try_borrow_mut().map_err(|_| "DesignCraft is processing a document request.")?;
+            if next.is_some() {
+                return Err("DesignCraft is processing a document request.".into());
+            }
+            *next = Some(request);
+            Ok(())
+        })
     }
 
     pub(crate) fn poll(&mut self, app: &mut DesignApp) {
@@ -129,6 +152,12 @@ impl AccountHost {
             if let Err(error) = self.receive(app, &packet) {
                 app.status(error);
             }
+        }
+        let action = self.action.borrow_mut().take();
+        if let Some(action) = action
+            && let Err(error) = self.document_action(app, action)
+        {
+            app.status(error);
         }
     }
 
@@ -146,7 +175,8 @@ impl AccountHost {
             let unfinished = Self::unfinished(app);
             let revision = document.interaction.as_ref().map_or(document.revision, |edit| edit.revision).to_string();
             json!({"available":true,"documentId":document.uid.to_string(),"revision":revision,"recoveryRevision":revision,
-                "dirty":document.is_dirty(),"capturable":!unfinished,"unfinishedEdit":unfinished,"autosaveEligible":false,"operationPending":self.pending.is_some()})
+                "dirty":document.is_dirty(),"capturable":!unfinished,"unfinishedEdit":unfinished,"autosaveEligible":false,
+                "operationPending":self.pending.is_some() || self.dialog.is_some()})
         })
     }
 
@@ -200,6 +230,7 @@ impl AccountHost {
             }
             Some("session-save") => self.capture_save(app, packet, id),
             Some("session") => self.session(app, packet, id),
+            Some("dialog-result") => self.dialog_result(app, packet),
             _ => Ok(()),
         }
     }
@@ -216,26 +247,89 @@ impl AccountHost {
         let document = number(packet, "documentId").ok_or("Invalid DesignCraft save document.")?;
         let revision = number(packet, "revision").ok_or("Invalid DesignCraft save revision.")?;
         let mut reply = json!({"requestId":id,"path":path,"documentId":document.to_string(),"reviewedRevision":revision.to_string()});
-        if self.pending.is_some() || self.suspended() || Self::unfinished(app) || !Self::targets(app, packet) {
+        if self.pending.is_some() || self.dialog.is_some() || self.suspended() || Self::unfinished(app) || !Self::targets(app, packet) {
             reply["outcome"] = json!("busy");
             return self.parent.send("session-save-result", reply, None);
         }
-        match app.session.prepare_account_save(&path) {
-            Ok((capture, bytes)) if bytes.len() <= MAX_PROJECT_BYTES as usize => {
-                let ticket = self.next_ticket;
-                self.next_ticket = ticket.checked_add(1).ok_or("DesignCraft save ticket space exhausted.")?;
-                reply["outcome"] = json!("captured");
-                reply["ticket"] = json!(ticket.to_string());
-                reply["revision"] = json!(revision.to_string());
-                self.parent.send("session-save-result", reply, Some(&bytes))?;
-                self.pending = Some(Save { ticket, document, revision, path, capture });
-                return Ok(());
-            }
-            Ok(_) => reply["message"] = json!("The publication exceeds the WebOS project size limit."),
-            Err(error) => reply["message"] = json!(error.to_string()),
+        if let Err(error) = self.send_save(app, path, "session-save-result", reply.clone()) {
+            reply["message"] = json!(error);
+            reply["outcome"] = json!("failed");
+            self.parent.send("session-save-result", reply, None)?;
         }
-        reply["outcome"] = json!("failed");
-        self.parent.send("session-save-result", reply, None)
+        Ok(())
+    }
+
+    fn send_save(&mut self, app: &DesignApp, path: String, kind: &str, mut reply: Value) -> Result<(), String> {
+        let state = app.session.active().ok_or("No DesignCraft publication is open.")?;
+        let (capture, bytes) = app.session.prepare_account_save(&path).map_err(|error| error.to_string())?;
+        if bytes.len() > MAX_PROJECT_BYTES as usize {
+            return Err("The publication exceeds the WebOS project size limit.".into());
+        }
+        let ticket = self.next_ticket;
+        self.next_ticket = ticket.checked_add(1).ok_or("DesignCraft save ticket space exhausted.")?;
+        reply["outcome"] = json!("captured");
+        reply["ticket"] = json!(ticket.to_string());
+        reply["documentId"] = json!(state.uid.to_string());
+        reply["revision"] = json!(state.revision.to_string());
+        reply["path"] = json!(path);
+        self.parent.send(kind, reply, Some(&bytes))?;
+        self.pending = Some(Save { ticket, document: state.uid, revision: state.revision, path, capture });
+        Ok(())
+    }
+
+    fn document_action(&mut self, app: &DesignApp, action: AccountDocumentRequest) -> Result<(), String> {
+        if self.suspended() || self.pending.is_some() || self.dialog.is_some() {
+            return Err("Finish the pending DesignCraft document operation first.".into());
+        }
+        let state = app.session.active().ok_or("No DesignCraft publication is open.")?;
+        match action {
+            AccountDocumentRequest::Close => self.parent.send("close-intent", json!({}), None),
+            AccountDocumentRequest::New(settings) => {
+                let settings = if settings.is_object() { settings } else { json!({}) };
+                self.request_dialog(json!({"operation":"new","settings":settings.to_string()}), None)
+            }
+            AccountDocumentRequest::Open => self.request_dialog(json!({"operation":"open","path":null}), None),
+            AccountDocumentRequest::Save | AccountDocumentRequest::SaveAs => {
+                if Self::unfinished(app) {
+                    return Err("Finish the active DesignCraft edit before saving.".into());
+                }
+                if matches!(action, AccountDocumentRequest::Save)
+                    && let Some(path) = &state.path
+                {
+                    return self.send_save(app, path.clone(), "save", json!({}));
+                }
+                let suggested = state.path.clone().unwrap_or_else(|| designcraft_engine::cmd::with_document_extension(&state.doc.title));
+                self.request_dialog(json!({"operation":"save","suggested":suggested}), Some((state.uid, state.revision)))
+            }
+        }
+    }
+
+    fn request_dialog(&mut self, mut packet: Value, save: Option<(u64, u64)>) -> Result<(), String> {
+        let id = self.next_dialog;
+        self.next_dialog = id.checked_add(1).ok_or("DesignCraft dialog space exhausted.")?;
+        packet["requestId"] = json!(id.to_string());
+        self.parent.send("dialog", packet, None)?;
+        self.dialog = Some(Dialog { id, save });
+        Ok(())
+    }
+
+    fn dialog_result(&mut self, app: &DesignApp, packet: &JsValue) -> Result<(), String> {
+        if self.dialog.as_ref().map(|dialog| dialog.id) != number(packet, "requestId") {
+            return Ok(());
+        }
+        let Some(dialog) = self.dialog.take() else { return Ok(()) };
+        match field(packet, "outcome", 16).as_deref() {
+            Some("failed") => Err(field(packet, "message", 250).unwrap_or_else(|| "The WebOS document dialog failed.".into())),
+            Some("destination") => {
+                let target = app.session.active().map(|state| (state.uid, state.revision));
+                if target.is_none() || target != dialog.save || Self::unfinished(app) || self.suspended() {
+                    return Err("The publication changed while choosing its save destination.".into());
+                }
+                let path = field(packet, "path", 2048).ok_or("Invalid DesignCraft destination.")?;
+                self.send_save(app, path, "save", json!({}))
+            }
+            _ => Ok(()),
+        }
     }
 
     fn settle_save(&mut self, app: &mut DesignApp, packet: &JsValue) -> Result<(), String> {
@@ -269,7 +363,7 @@ impl AccountHost {
         let operation = field(packet, "operation", 16).ok_or("Invalid DesignCraft session operation.")?;
         let lease = field(packet, "lease", 64).filter(|lease| !lease.is_empty()).ok_or("Invalid DesignCraft session lease.")?;
         let accepted = match operation.as_str() {
-            "pause" if !self.suspended() && self.pending.is_none() => {
+            "pause" if !self.suspended() && self.pending.is_none() && self.dialog.is_none() => {
                 let dirty = app.session.active().map(|document| document.is_dirty());
                 if !Self::targets(app, packet)
                     || dirty != get(packet, "dirty").as_bool()
@@ -312,7 +406,12 @@ fn start_publication(app: &mut DesignApp, packet: &JsValue) -> Result<(), String
     let recover = get(packet, "recover").as_bool().ok_or("Invalid DesignCraft recovery request.")?;
     let bytes = get(packet, "bytes");
     if bytes.is_null() && path.is_none() && !recover {
-        app.session.execute("file.new", &json!({})).map_err(|error| error.to_string())?;
+        let settings = match field(packet, "newSettings", 4096) {
+            Some(value) => serde_json::from_str::<Value>(&value).map_err(|_| "Invalid DesignCraft publication settings.")?,
+            None => json!({}),
+        };
+        let command = if settings["sample"] == true { "file.newSample" } else { "file.new" };
+        app.session.execute(command, &settings).map_err(|error| error.to_string())?;
         app.after_engine();
         return Ok(());
     }

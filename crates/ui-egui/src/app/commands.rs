@@ -1,8 +1,32 @@
 use super::{DesignApp, UiRequest, Value, canvas, dialogs, json, menus};
+use crate::AccountDocumentRequest;
 
 impl DesignApp {
     /// THE entry point for every action (menus, shortcuts, palette, panels, control channel).
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
+        if let Some(account) = &mut self.services.account_document {
+            let request = match id {
+                "file.new" => Some(AccountDocumentRequest::New(params.clone())),
+                "file.newSample" => Some(AccountDocumentRequest::New(json!({"sample":true}))),
+                "app.openDialog" | "app.openRecent" | "file.open" => Some(AccountDocumentRequest::Open),
+                "app.save" | "file.save" => Some(AccountDocumentRequest::Save),
+                "app.saveDialog" | "file.saveAs" => Some(AccountDocumentRequest::SaveAs),
+                "file.close" | "app.quit" => Some(AccountDocumentRequest::Close),
+                "file.openBytes" | "file.openIdml" | "file.openRecent" | "file.revert" | "data.merge" | "window.newWindow" => {
+                    let error = "This operation requires a separate account publication view.".to_string();
+                    self.status(error.clone());
+                    return Err(error);
+                }
+                _ => None,
+            };
+            if let Some(request) = request {
+                let result = account(request);
+                if let Err(error) = &result {
+                    self.status(error.clone());
+                }
+                return result.map(|()| Value::Null);
+            }
+        }
         if let Some(r) = menus::run_ui(self, id, &params) {
             return r;
         }

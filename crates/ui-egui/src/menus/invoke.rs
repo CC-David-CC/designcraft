@@ -6,6 +6,10 @@ use super::{DesignApp, Value, json};
 /// tab's ×, File ▸ Close or its shortcut. A document with unsaved changes asks first, because
 /// closing also discards its recovery data. Scripts and agents use `file.close`, which never asks.
 pub fn close_document(app: &mut DesignApp, index: Option<usize>) {
+    if app.services.account_document.is_some() {
+        let _ = app.run("file.close", Value::Null);
+        return;
+    }
     let Some(i) = index.or(app.session.active_index()) else { return };
     match app.session.documents().get(i) {
         Some(d) if d.is_dirty() => {

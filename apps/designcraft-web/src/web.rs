@@ -92,7 +92,9 @@ pub fn start() {
                         .map(|endpoint| AccountHost::install(endpoint, cc.egui_ctx.clone()))
                         .transpose()
                         .map_err(std::io::Error::other)?;
-                    let mut app = DesignApp::new(Session::new(), services(inbox.clone(), cc.egui_ctx.clone()));
+                    let mut services = services(inbox.clone(), cc.egui_ctx.clone());
+                    services.account_document = account.as_ref().map(AccountHost::document_service);
+                    let mut app = DesignApp::new(Session::new(), services);
                     if account.is_none() && has_query_flag(&query(), "sample") {
                         let _ = app.run("file.newSample", serde_json::json!({}));
                     }
