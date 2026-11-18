@@ -358,8 +358,7 @@ const MAX_LINK_PATH_BYTES: usize = 128 * 1024;
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_LINK_SUFFIX_PARTS: usize = 8;
 
-/// Largest linked file read when a package is opened (bytes); bigger files stay missing.
-#[cfg(not(target_arch = "wasm32"))]
+/// Largest linked artwork file accepted by the engine (bytes).
 pub(crate) const MAX_LINKED_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// The files to try for `link` in the package at `package`: the link itself, then its trailing
