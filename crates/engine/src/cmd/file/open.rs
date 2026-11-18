@@ -164,7 +164,18 @@ fn document_fonts_folder(dir: &std::path::Path) -> std::path::PathBuf {
 impl Session {
     /// Open a native publication verified by the account host in a new editor session.
     pub fn open_account_document(&mut self, path: &str, bytes: &[u8]) -> Result<Vec<String>> {
-        let name = super::account_file_name(path).ok_or_else(|| bad("file.open", "choose an account-relative .designcraft path"))?;
+        self.load_account_document(Some(path), bytes, false)
+    }
+
+    /// Restore an unsaved native snapshot. The account host supplies a path only when its prior revision still exists.
+    pub fn restore_account_draft(&mut self, path: Option<&str>, bytes: &[u8]) -> Result<Vec<String>> {
+        self.load_account_document(path, bytes, true)
+    }
+
+    fn load_account_document(&mut self, path: Option<&str>, bytes: &[u8], recovered: bool) -> Result<Vec<String>> {
+        let name = path
+            .map(|path| super::account_file_name(path).ok_or_else(|| bad("file.open", "choose an account-relative .designcraft path")))
+            .transpose()?;
         if !self.documents().is_empty() {
             return Err(bad("file.open", "open the account publication in a fresh editor"));
         }
@@ -176,8 +187,15 @@ impl Session {
         if linked > 0 {
             warnings.push(format!("{linked} linked assets need their originals from account storage"));
         }
-        document.title = without_native_extension(name).to_owned();
-        self.add_document(DocState::new(document, Some(path.to_owned())));
+        if let Some(name) = name {
+            document.title = without_native_extension(name).to_owned();
+        }
+        let mut state = DocState::new(document, path.map(str::to_owned));
+        if recovered {
+            state.saved_doc = Arc::new((*state.doc).clone());
+            state.bump_revision();
+        }
+        self.add_document(state);
         Ok(warnings)
     }
 }
@@ -594,6 +612,23 @@ mod open_bytes_tests {
         assert_eq!(document.doc.title, "Publication");
         assert!(!document.is_dirty());
         assert!(document.doc.stories.values().any(|story| story.text == "Account publication"));
+    }
+
+    #[test]
+    fn account_recovery_is_dirty_even_when_the_binding_is_preserved() {
+        let mut author = Session::new();
+        author.execute("file.new", &json!({})).unwrap();
+        author.execute("frame.create", &json!({"rect":[36,36,300,200],"content":"text","text":"Recovered text","caret":false})).unwrap();
+        let bytes = author.account_recovery_snapshot().unwrap();
+        for path in [Some("Documents/Catalog.designcraft"), None] {
+            let mut restored = Session::new();
+            restored.restore_account_draft(path, &bytes).unwrap();
+            let document = restored.doc().unwrap();
+            assert_eq!(document.path.as_deref(), path);
+            assert!(document.is_dirty());
+            assert!(document.revision > document.saved_revision);
+            assert!(document.doc.stories.values().any(|story| story.text == "Recovered text"));
+        }
     }
 
     /// A `.designcraft` file opened from bytes under its file name (a browser or host passes the
