@@ -579,7 +579,8 @@ mod open_bytes_tests {
     #[test]
     fn account_open_checks_the_path_and_keeps_one_publication_per_session() {
         let mut author = Session::new();
-        new_document(&mut author, "Inter", "Account publication");
+        author.execute("file.new", &json!({})).unwrap();
+        author.execute("frame.create", &json!({"rect":[36,36,300,200],"content":"text","text":"Account publication","caret":false})).unwrap();
         let (_, bytes) = author.prepare_account_save("Documents/Publication.designcraft").unwrap();
         let mut restored = Session::new();
         assert!(restored.open_account_document("../Publication.designcraft", &bytes).is_err());
