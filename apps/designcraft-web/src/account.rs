@@ -244,6 +244,7 @@ impl AccountHost {
             Some("session-save") => self.capture_save(app, packet, id),
             Some("session") => self.session(app, packet, id),
             Some("dialog-result") => self.dialog_result(app, packet),
+            Some("operation") => self.operation(app, packet, id),
             _ => Ok(()),
         }
     }
@@ -253,6 +254,48 @@ impl AccountHost {
             let revision = state.interaction.as_ref().map_or(state.revision, |edit| edit.revision);
             number(packet, "documentId") == Some(state.uid) && number(packet, "revision") == Some(revision)
         })
+    }
+
+    fn operation(&self, app: &mut DesignApp, packet: &JsValue, id: String) -> Result<(), String> {
+        let document = field(packet, "documentId", 20).ok_or("Invalid DesignCraft document target.")?;
+        let mut reply = json!({"requestId":id,"documentId":document});
+        match self.run_operation(app, packet) {
+            Ok(value) => reply["result"] = json!(value.to_string()),
+            Err(error) => reply["message"] = json!(error),
+        }
+        self.parent.send("operation-result", reply, None)
+    }
+
+    fn run_operation(&self, app: &mut DesignApp, packet: &JsValue) -> Result<Value, String> {
+        let path = get(packet, "path");
+        let path = if path.is_null() { None } else { Some(path.as_string().ok_or("Invalid DesignCraft document binding.")?) };
+        let state = app.session.active().ok_or("No DesignCraft publication is open.")?;
+        if self.suspended() || number(packet, "documentId") != Some(state.uid) || path != state.path {
+            return Err("The DesignCraft operation does not match the current publication.".into());
+        }
+        let command = field(packet, "command", 64).ok_or("Invalid DesignCraft operation.")?;
+        let args = field(packet, "args", 4096).ok_or("Invalid DesignCraft operation arguments.")?;
+        let args = serde_json::from_str::<Value>(&args).map_err(|_| "Invalid DesignCraft operation arguments.")?;
+        let object = args.as_object().ok_or("DesignCraft operation arguments must be an object.")?;
+        if command == "document.inspect" && object.is_empty() {
+            return Ok(json!({"title":state.title(),"pages":state.doc.page_count(),"stories":state.doc.stories.len(),"dirty":state.is_dirty()}));
+        }
+        if self.pending.is_some() || self.dialog.is_some() || Self::unfinished(app) {
+            return Err("Finish the pending DesignCraft edit or operation first.".into());
+        }
+        match command.as_str() {
+            "frame.create" if object.len() == 2 => {
+                let valid_rect =
+                    object.get("rect").and_then(Value::as_array).is_some_and(|rect| rect.len() == 4 && rect.iter().all(Value::is_number));
+                let text = object.get("text").and_then(Value::as_str).filter(|text| !text.is_empty() && text.len() <= 2048);
+                match (valid_rect, text) {
+                    (true, Some(text)) => app.run("frame.create", json!({"rect":object["rect"],"text":text,"content":"text","caret":false})),
+                    _ => Err("Choose a rectangle and text for the DesignCraft frame.".into()),
+                }
+            }
+            "edit.undo" if object.is_empty() => app.run("edit.undo", json!({})),
+            _ => Err("Unsupported DesignCraft document operation.".into()),
+        }
     }
 
     fn capture_save(&mut self, app: &DesignApp, packet: &JsValue, id: String) -> Result<(), String> {
