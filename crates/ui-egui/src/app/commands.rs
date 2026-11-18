@@ -161,3 +161,44 @@ impl DesignApp {
         self.ui.flyout = None;
     }
 }
+
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+    use crate::Services;
+    use designcraft_engine::Session;
+    use std::{cell::RefCell, rc::Rc};
+
+    #[test]
+    fn account_file_actions_keep_the_native_publication_bound_until_host_confirmation() {
+        let mut session = Session::new();
+        session.execute("file.new", &json!({})).unwrap();
+        session.execute("frame.create", &json!({"rect":[32,32,300,240],"content":"text","text":"Test","caret":false})).unwrap();
+        let identity = session.active().unwrap().uid;
+        let actions = Rc::new(RefCell::new(Vec::new()));
+        let received = actions.clone();
+        let mut app = DesignApp::new(
+            session,
+            Services {
+                account_document: Some(Box::new(move |action| {
+                    received.borrow_mut().push(action);
+                    Ok(())
+                })),
+                ..Default::default()
+            },
+        );
+        app.run("app.save", Value::Null).unwrap();
+        app.run("file.saveAs", json!({"path":"Other.designcraft"})).unwrap();
+        app.run("app.openDialog", Value::Null).unwrap();
+        app.run("file.new", json!({"preset":"Letter"})).unwrap();
+        menus::close_document(&mut app, Some(0));
+        assert!(app.run("file.openBytes", json!({"base64":"file"})).is_err());
+        assert!(matches!(actions.borrow().as_slice(), [AccountDocumentRequest::Save, AccountDocumentRequest::SaveAs,
+            AccountDocumentRequest::Open, AccountDocumentRequest::New(settings), AccountDocumentRequest::Close] if settings["preset"] == "Letter"));
+        assert_eq!(app.session.documents().len(), 1);
+        let document = app.session.active().unwrap();
+        assert_eq!(document.uid, identity);
+        assert!(document.is_dirty());
+        assert!(document.path.is_none());
+    }
+}

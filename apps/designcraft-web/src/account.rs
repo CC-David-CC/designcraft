@@ -129,8 +129,18 @@ impl AccountHost {
             .add_event_listener_with_callback("message", listener.as_ref().unchecked_ref())
             .map_err(|_| "Could not receive WebOS document requests.")?;
         Ok(Self {
-            parent, browser, inbox, listener, last_state: Value::Null, action: Rc::default(), dialog: None, next_dialog: 1,
-            pending: None, next_ticket: 1, lease: None, finalized: false,
+            parent,
+            browser,
+            inbox,
+            listener,
+            last_state: Value::Null,
+            action: Rc::default(),
+            dialog: None,
+            next_dialog: 1,
+            pending: None,
+            next_ticket: 1,
+            lease: None,
+            finalized: false,
         })
     }
 
@@ -171,13 +181,16 @@ impl AccountHost {
     }
 
     fn state(&self, app: &DesignApp) -> Value {
-        app.session.active().map_or_else(|| json!({"available":false}), |document| {
-            let unfinished = Self::unfinished(app);
-            let revision = document.interaction.as_ref().map_or(document.revision, |edit| edit.revision).to_string();
-            json!({"available":true,"documentId":document.uid.to_string(),"revision":revision,"recoveryRevision":revision,
+        app.session.active().map_or_else(
+            || json!({"available":false}),
+            |document| {
+                let unfinished = Self::unfinished(app);
+                let revision = document.interaction.as_ref().map_or(document.revision, |edit| edit.revision).to_string();
+                json!({"available":true,"documentId":document.uid.to_string(),"revision":revision,"recoveryRevision":revision,
                 "dirty":document.is_dirty(),"capturable":!unfinished,"unfinishedEdit":unfinished,"autosaveEligible":false,
                 "operationPending":self.pending.is_some() || self.dialog.is_some()})
-        })
+            },
+        )
     }
 
     pub(crate) fn publish_state(&mut self, app: &DesignApp) -> Result<(), String> {
