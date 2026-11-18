@@ -48,8 +48,8 @@ pub fn start() {
         }
         let graphics = GraphicsState::default();
         let query_string = query();
-        let account_mode = form_urlencoded::parse(query_string.trim_start_matches('?').as_bytes())
-            .any(|(key, value)| key == "host" && value == "webos-account");
+        let account_mode =
+            form_urlencoded::parse(query_string.trim_start_matches('?').as_bytes()).any(|(key, value)| key == "host" && value == "webos-account");
         let parent = if account_mode {
             match Parent::connect() {
                 Ok(parent) => Some(parent),

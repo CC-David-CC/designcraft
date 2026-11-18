@@ -28,7 +28,10 @@ impl Parent {
             return Err("DesignCraft requires a same-origin WebOS window.".into());
         }
         let mut bytes = [0u8; 16];
-        browser.crypto().and_then(|crypto| crypto.get_random_values_with_u8_array(&mut bytes)).map_err(|_| "Could not identify the editor window.")?;
+        browser
+            .crypto()
+            .and_then(|crypto| crypto.get_random_values_with_u8_array(&mut bytes))
+            .map_err(|_| "Could not identify the editor window.")?;
         let generation = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
         Ok(Self { window, origin, generation })
     }
@@ -114,7 +117,9 @@ impl AccountHost {
                 context.request_repaint();
             }
         });
-        browser.add_event_listener_with_callback("message", listener.as_ref().unchecked_ref()).map_err(|_| "Could not receive WebOS document requests.")?;
+        browser
+            .add_event_listener_with_callback("message", listener.as_ref().unchecked_ref())
+            .map_err(|_| "Could not receive WebOS document requests.")?;
         Ok(Self { parent, browser, inbox, listener, last_state: Value::Null, pending: None, next_ticket: 1, lease: None, finalized: false })
     }
 
@@ -132,7 +137,8 @@ impl AccountHost {
     }
 
     fn unfinished(app: &DesignApp) -> bool {
-        app.session.tool_composing() || app.session.active().is_some_and(|document| document.interaction.is_some() || document.preview_stash.is_some())
+        app.session.tool_composing()
+            || app.session.active().is_some_and(|document| document.interaction.is_some() || document.preview_stash.is_some())
     }
 
     fn state(&self, app: &DesignApp) -> Value {
@@ -162,9 +168,15 @@ impl AccountHost {
         let Some(id) = field(packet, "requestId", 36) else { return Ok(()) };
         match kind {
             Some("start") => {
-                let result = start_publication(app, packet);
-                let reply = match result {
-                    Ok(()) => json!({"requestId":id,"ok":true}),
+                let reply = match start_publication(app, packet) {
+                    Ok(()) => {
+                        let document = app.session.active().ok_or("DesignCraft did not open a publication.")?;
+                        let mut state = self.state(app);
+                        state["requestId"] = json!(id);
+                        state["ok"] = json!(true);
+                        state["path"] = json!(document.path);
+                        state
+                    }
                     Err(message) => json!({"requestId":id,"ok":false,"message":message}),
                 };
                 self.parent.send("started", reply, None)
@@ -228,8 +240,10 @@ impl AccountHost {
 
     fn settle_save(&mut self, app: &mut DesignApp, packet: &JsValue) -> Result<(), String> {
         let matches = self.pending.as_ref().is_some_and(|save| {
-            number(packet, "ticket") == Some(save.ticket) && number(packet, "documentId") == Some(save.document)
-                && number(packet, "revision") == Some(save.revision) && field(packet, "path", 2048).as_deref() == Some(save.path.as_str())
+            number(packet, "ticket") == Some(save.ticket)
+                && number(packet, "documentId") == Some(save.document)
+                && number(packet, "revision") == Some(save.revision)
+                && field(packet, "path", 2048).as_deref() == Some(save.path.as_str())
         });
         if !matches {
             return Ok(());
@@ -243,8 +257,12 @@ impl AccountHost {
         if adopted {
             app.after_engine();
         }
-        self.parent.send("save-settled", json!({"ticket":save.ticket.to_string(),"documentId":save.document.to_string(),
-            "revision":save.revision.to_string(),"path":save.path,"adopted":adopted,"projectState":self.state(app)}), None)
+        self.parent.send(
+            "save-settled",
+            json!({"ticket":save.ticket.to_string(),"documentId":save.document.to_string(),
+            "revision":save.revision.to_string(),"path":save.path,"adopted":adopted,"projectState":self.state(app)}),
+            None,
+        )
     }
 
     fn session(&mut self, app: &DesignApp, packet: &JsValue, id: String) -> Result<(), String> {
@@ -253,7 +271,8 @@ impl AccountHost {
         let accepted = match operation.as_str() {
             "pause" if !self.suspended() && self.pending.is_none() => {
                 let dirty = app.session.active().map(|document| document.is_dirty());
-                if !Self::targets(app, packet) || dirty != get(packet, "dirty").as_bool()
+                if !Self::targets(app, packet)
+                    || dirty != get(packet, "dirty").as_bool()
                     || Some(Self::unfinished(app)) != get(packet, "unfinishedEdit").as_bool()
                 {
                     false
@@ -269,8 +288,12 @@ impl AccountHost {
             }
             _ => false,
         };
-        self.parent.send("session-result", json!({"requestId":id,"operation":operation,"lease":lease,"ok":accepted,
-            "message":if accepted {""} else {"The DesignCraft publication changed after close review."}}), None)
+        self.parent.send(
+            "session-result",
+            json!({"requestId":id,"operation":operation,"lease":lease,"ok":accepted,
+            "message":if accepted {""} else {"The DesignCraft publication changed after close review."}}),
+            None,
+        )
     }
 }
 
