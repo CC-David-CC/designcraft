@@ -67,16 +67,7 @@ impl DesignApp {
             Ok(_) => {}
         }
         if r.is_ok() && matches!(id, "file.open" | "file.openIdml" | "file.openBytes") {
-            if self.ui.dialog.as_ref().is_some_and(|d| d.id == "findFont") {
-                self.ui.dialog = None;
-            }
-            match self.session.execute("font.list", &json!({})) {
-                Ok(fonts) if fonts.as_array().is_some_and(|fonts| fonts.iter().any(|f| f["missing"] == true || f["styleMissing"] == true)) => {
-                    self.ui.dialog = Some(dialogs::Dialog::new("findFont", json!({"_fonts": fonts, "onOpen": true})));
-                }
-                Err(e) => self.status(e.to_string()),
-                _ => {}
-            }
+            self.check_opened_document_fonts();
         }
         if r.is_ok()
             && matches!(id, "font.replace" | "font.reload" | "edit.undo" | "edit.redo")
@@ -85,6 +76,27 @@ impl DesignApp {
             dialog.fields.remove("_fonts");
         }
         r
+    }
+
+    /// Adopt a verified account publication and initialize the existing native editor state.
+    pub fn open_account_document(&mut self, path: &str, bytes: &[u8]) -> Result<Vec<String>, String> {
+        let warnings = self.session.open_account_document(path, bytes).map_err(|error| error.to_string())?;
+        self.after_engine();
+        self.check_opened_document_fonts();
+        Ok(warnings)
+    }
+
+    fn check_opened_document_fonts(&mut self) {
+        if self.ui.dialog.as_ref().is_some_and(|d| d.id == "findFont") {
+            self.ui.dialog = None;
+        }
+        match self.session.execute("font.list", &json!({})) {
+            Ok(fonts) if fonts.as_array().is_some_and(|fonts| fonts.iter().any(|f| f["missing"] == true || f["styleMissing"] == true)) => {
+                self.ui.dialog = Some(dialogs::Dialog::new("findFont", json!({"_fonts": fonts, "onOpen": true})));
+            }
+            Err(e) => self.status(e.to_string()),
+            _ => {}
+        }
     }
 
     /// Handle requests produced by tools/commands (dialogs, view changes, file pickers).
