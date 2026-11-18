@@ -4,6 +4,36 @@ fn png(w: u32, h: u32) -> Vec<u8> {
     designcraft_render::Rendered { width: w, height: h, pixels: vec![200u8; (w * h * 4) as usize] }.to_png()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn account_relink_embeds_the_complete_original_and_preserves_undo() {
+    let source = std::env::temp_dir().join(format!("designcraft-account-link-{}.png", std::process::id()));
+    std::fs::write(&source, png(15, 19)).unwrap();
+    let mut editor = Session::new();
+    editor.execute("file.new", &json!({})).unwrap();
+    let placement = editor.execute("file.place", &json!({"path":source.to_string_lossy(),"link":true})).unwrap();
+    let id = placement["asset"].as_u64().unwrap();
+    let asset = AssetId(id);
+    assert_eq!(editor.doc().unwrap().doc.assets[&asset].storage, Storage::Linked);
+    assert!(editor.embed_account_graphic(id, "Corrupt.png", b"broken".to_vec()).is_err());
+    assert_eq!(editor.doc().unwrap().doc.assets[&asset].storage, Storage::Linked);
+    let original = png(81, 73);
+    editor.embed_account_graphic(id, "Original.png", original.clone()).unwrap();
+    assert_eq!(editor.doc().unwrap().doc.assets[&asset].storage, Storage::Embedded);
+    editor.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(editor.doc().unwrap().doc.assets[&asset].storage, Storage::Linked);
+    editor.execute("edit.redo", &json!({})).unwrap();
+    std::fs::remove_file(source).unwrap();
+    let (_, bytes) = editor.prepare_account_save("Documents/Catalog.designcraft").unwrap();
+    let mut reopened = Session::new();
+    reopened.open_account_document("Documents/Catalog.designcraft", &bytes).unwrap();
+    let artwork = &reopened.doc().unwrap().doc.assets[&asset];
+    assert_eq!(artwork.pixels, Some((81, 73)));
+    assert_eq!(artwork.data.load().unwrap().as_ref(), &original);
+    let pdf = reopened.execute("file.exportPdf", &json!({})).unwrap();
+    assert!(super::super::file::base64_decode(pdf["base64"].as_str().unwrap()).starts_with(b"%PDF"));
+}
+
 /// The Links panel polls `links.list` twice a second: a linked image whose file keeps its size
 /// and time is not read again (press-size images would otherwise be read whole on every poll).
 /// A new time is read once; changed bytes show as modified; an update is remembered.

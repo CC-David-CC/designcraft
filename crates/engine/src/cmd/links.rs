@@ -894,24 +894,30 @@ fn relinked_asset(a: &designcraft_doc::Asset, read: &Path, document: Option<&Pat
     // The size and time from before the read: a change during it is seen by the next check.
     let before = super::datamerge::fingerprint_of(read);
     let (bytes, px) = reload(read)?;
-    let page = if designcraft_render::is_pdf(&bytes) { a.page } else { 0 };
-    let px = if page > 0 {
-        designcraft_render::pdf_page_size(&bytes, page as usize)
-            .map(|(w, h)| (w.round().max(1.0) as u32, h.round().max(1.0) as u32))
-            .ok_or_else(|| bad("links", format!("{}: can't read PDF page {}", read.display(), u64::from(page) + 1)))?
-    } else {
-        px
-    };
-    let mut a = a.clone();
-    a.mime = designcraft_render::image_mime(&bytes).to_string();
-    a.pixels = Some(px);
-    a.page = page;
-    a.name = file_name(&read.to_string_lossy());
-    // A placed PDF keeps its crop choice; its box is found on the new file.
-    super::file::crop_pdf_from(&mut a, &bytes);
+    let name = file_name(&read.to_string_lossy());
+    let mut a = replacement_graphic(a, &bytes, px, &name)?;
     let file = FileLink::of(read, before);
     give_bytes(&mut a, bytes, Some(file), false, document);
     Ok(Arc::new(a))
+}
+
+fn replacement_graphic(asset: &Asset, bytes: &[u8], px: (u32, u32), name: &str) -> Result<Asset> {
+    let page = if designcraft_render::is_pdf(bytes) { asset.page } else { 0 };
+    let px = if page > 0 {
+        designcraft_render::pdf_page_size(bytes, page as usize)
+            .map(|(w, h)| (w.round().max(1.0) as u32, h.round().max(1.0) as u32))
+            .ok_or_else(|| bad("links", format!("{name}: can't read PDF page {}", u64::from(page) + 1)))?
+    } else {
+        px
+    };
+    let mut a = asset.clone();
+    a.mime = designcraft_render::image_mime(bytes).to_string();
+    a.pixels = Some(px);
+    a.page = page;
+    a.name = name.to_owned();
+    // A placed PDF keeps its crop choice; its box is found on the new file.
+    super::file::crop_pdf_from(&mut a, bytes);
+    Ok(a)
 }
 
 /// The file Update reads `a`'s bytes from: the first of a linked graphic's paths that holds a
@@ -940,6 +946,10 @@ fn relink(s: &mut Session, p: &Value) -> Result<Value> {
     let a = st.doc.assets.get(&aid).ok_or_else(|| bad("links.relink", "no such graphic"))?;
     // Build the replacement before the edit: a file that cannot be read leaves the document as it was.
     let fresh = relinked_asset(a, Path::new(&path), st.path.as_deref().map(Path::new))?;
+    replace_graphic(s, aid, fresh)
+}
+
+fn replace_graphic(s: &mut Session, aid: AssetId, fresh: Arc<Asset>) -> Result<Value> {
     let r = s.edit(|d, _| {
         let name = fresh.name.clone();
         d.assets.insert(aid, fresh);
@@ -948,6 +958,28 @@ fn relink(s: &mut Session, p: &Value) -> Result<Value> {
     s.link_checks.images.clear();
     designcraft_doc::asset_data::links_changed();
     r
+}
+
+impl Session {
+    /// Replace a placed graphic with the selected account's full original and make the publication portable.
+    pub fn embed_account_graphic(&mut self, id: u64, filename: &str, bytes: Vec<u8>) -> Result<Value> {
+        const ID: &str = "links.relink";
+        if filename.is_empty() || filename.chars().any(|ch| ch == '/' || ch == '\\' || ch.is_control()) {
+            return Err(bad(ID, "choose a graphic filename"));
+        }
+        if bytes.len() as u64 > super::interchange::MAX_LINKED_FILE_BYTES {
+            return Err(bad(ID, "the selected graphic exceeds the file size limit"));
+        }
+        if designcraft_render::is_pdf(&bytes) {
+            designcraft_render::check_pdf_input_size(bytes.len()).map_err(|error| bad(ID, error.to_string()))?;
+        }
+        let size = designcraft_render::image_size(&bytes).ok_or_else(|| bad(ID, "unsupported or corrupt selected graphic"))?;
+        let id = AssetId(id);
+        let asset = self.doc()?.doc.assets.get(&id).ok_or_else(|| bad(ID, "the selected graphic is no longer in the publication"))?;
+        let mut replacement = replacement_graphic(asset, &bytes, size, filename)?;
+        give_bytes(&mut replacement, bytes, None, true, None);
+        replace_graphic(self, id, Arc::new(replacement))
+    }
 }
 
 /// `links.relinkFolder`: relink graphics to same-named files in a folder and/or with another
