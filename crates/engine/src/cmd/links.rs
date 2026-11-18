@@ -975,10 +975,18 @@ impl Session {
         }
         let size = designcraft_render::image_size(&bytes).ok_or_else(|| bad(ID, "unsupported or corrupt selected graphic"))?;
         let id = AssetId(id);
-        let asset = self.doc()?.doc.assets.get(&id).ok_or_else(|| bad(ID, "the selected graphic is no longer in the publication"))?;
+        let state = self.doc()?;
+        if self.tool_composing() || state.interaction.is_some() || state.preview_stash.is_some() {
+            return Err(bad(ID, "finish the active edit before relinking a graphic"));
+        }
+        let asset = state.doc.assets.get(&id).ok_or_else(|| bad(ID, "the selected graphic is no longer in the publication"))?;
         let mut replacement = replacement_graphic(asset, &bytes, size, filename)?;
         give_bytes(&mut replacement, bytes, None, true, None);
-        replace_graphic(self, id, Arc::new(replacement))
+        let command = crate::find_command(ID).ok_or_else(|| bad(ID, "the native Relink command is unavailable"))?;
+        let before = Some((state.uid, state.doc.clone(), state.selection.clone()));
+        let result = replace_graphic(self, id, Arc::new(replacement))?;
+        self.record_undo_step(command, before, self.in_undo_step);
+        Ok(result)
     }
 }
 

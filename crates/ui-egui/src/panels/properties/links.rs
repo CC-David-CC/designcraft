@@ -189,13 +189,17 @@ pub fn links_panel(app: &mut DesignApp, ui: &mut egui::Ui) {
             p
         };
         if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Relink…"))).clicked() {
-            let target = with("path", Value::Null);
-            let asked = app.ask_open("relink", Bound::Document, move |app, path| {
-                let _ = app.run("links.relink", crate::app::file_dialogs::with_path(&target, "path", path));
-                Ok(Value::Null)
-            });
-            if let Err(e) = asked {
-                app.status_error("Relink", e);
+            if !is_text && app.services.account_document.is_some() {
+                let _ = app.run("links.relink", target.clone());
+            } else {
+                let target = with("path", Value::Null);
+                let asked = app.ask_open("relink", Bound::Document, move |app, path| {
+                    let _ = app.run("links.relink", crate::app::file_dialogs::with_path(&target, "path", path));
+                    Ok(Value::Null)
+                });
+                if let Err(e) = asked {
+                    app.status_error("Relink", e);
+                }
             }
         }
         if ui.button(crate::rtl::widget(ui, crate::i18n::tr(&app.ui.language, "Go To"))).clicked() {

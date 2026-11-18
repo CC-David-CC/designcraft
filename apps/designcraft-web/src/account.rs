@@ -84,7 +84,13 @@ struct Save {
 
 struct Dialog {
     id: u64,
-    save: Option<(u64, u64)>,
+    action: DialogAction,
+}
+
+enum DialogAction {
+    Navigate,
+    Save { document: u64, revision: u64 },
+    Relink { document: u64, revision: u64, asset: u64 },
 }
 
 pub(crate) struct AccountHost {
@@ -278,7 +284,15 @@ impl AccountHost {
         let args = serde_json::from_str::<Value>(&args).map_err(|_| "Invalid DesignCraft operation arguments.")?;
         let object = args.as_object().ok_or("DesignCraft operation arguments must be an object.")?;
         if command == "document.inspect" && object.is_empty() {
-            return Ok(json!({"title":state.title(),"pages":state.doc.page_count(),"stories":state.doc.stories.len(),"dirty":state.is_dirty()}));
+            let graphics: Vec<_> = state
+                .doc
+                .assets
+                .values()
+                .take(100)
+                .map(|graphic| json!({"id":graphic.id.0,"name":graphic.name,"pixels":graphic.pixels,"storage":graphic.storage,"mime":graphic.mime}))
+                .collect();
+            return Ok(json!({"title":state.title(),"pages":state.doc.page_count(),"stories":state.doc.stories.len(),
+                "dirty":state.is_dirty(),"graphics":graphics}));
         }
         if self.pending.is_some() || self.dialog.is_some() || Self::unfinished(app) {
             return Err("Finish the pending DesignCraft edit or operation first.".into());
@@ -293,6 +307,7 @@ impl AccountHost {
                     _ => Err("Choose a rectangle and text for the DesignCraft frame.".into()),
                 }
             }
+            "links.relink" if object.len() == 1 && object.get("asset").and_then(Value::as_u64).is_some() => app.run("links.relink", args),
             "edit.undo" if object.is_empty() => app.run("edit.undo", json!({})),
             _ => Err("Unsupported DesignCraft document operation.".into()),
         }
@@ -342,9 +357,15 @@ impl AccountHost {
             AccountDocumentRequest::Close => self.parent.send("close-intent", json!({}), None),
             AccountDocumentRequest::New(settings) => {
                 let settings = if settings.is_object() { settings } else { json!({}) };
-                self.request_dialog(json!({"operation":"new","settings":settings.to_string()}), None)
+                self.request_dialog(json!({"operation":"new","settings":settings.to_string()}), DialogAction::Navigate)
             }
-            AccountDocumentRequest::Open => self.request_dialog(json!({"operation":"open","path":null}), None),
+            AccountDocumentRequest::Open => self.request_dialog(json!({"operation":"open","path":null}), DialogAction::Navigate),
+            AccountDocumentRequest::RelinkGraphic(asset) => {
+                if Self::unfinished(app) {
+                    return Err("Finish the active DesignCraft edit before relinking a graphic.".into());
+                }
+                self.request_dialog(json!({"operation":"relink"}), DialogAction::Relink { document: state.uid, revision: state.revision, asset })
+            }
             AccountDocumentRequest::Save | AccountDocumentRequest::SaveAs => {
                 if Self::unfinished(app) {
                     return Err("Finish the active DesignCraft edit before saving.".into());
@@ -355,17 +376,20 @@ impl AccountHost {
                     return self.send_save(app, path.clone(), "save", json!({}));
                 }
                 let suggested = state.path.clone().unwrap_or_else(|| designcraft_engine::cmd::with_document_extension(&state.doc.title));
-                self.request_dialog(json!({"operation":"save","suggested":suggested}), Some((state.uid, state.revision)))
+                self.request_dialog(
+                    json!({"operation":"save","suggested":suggested}),
+                    DialogAction::Save { document: state.uid, revision: state.revision },
+                )
             }
         }
     }
 
-    fn request_dialog(&mut self, mut packet: Value, save: Option<(u64, u64)>) -> Result<(), String> {
+    fn request_dialog(&mut self, mut packet: Value, action: DialogAction) -> Result<(), String> {
         let id = self.next_dialog;
         self.next_dialog = id.checked_add(1).ok_or("DesignCraft dialog space exhausted.")?;
         packet["requestId"] = json!(id.to_string());
         self.parent.send("dialog", packet, None)?;
-        self.dialog = Some(Dialog { id, save });
+        self.dialog = Some(Dialog { id, action });
         Ok(())
     }
 
@@ -374,15 +398,30 @@ impl AccountHost {
             return Ok(());
         }
         let Some(dialog) = self.dialog.take() else { return Ok(()) };
-        match field(packet, "outcome", 16).as_deref() {
-            Some("failed") => Err(field(packet, "message", 250).unwrap_or_else(|| "The WebOS document dialog failed.".into())),
-            Some("destination") => {
-                let target = app.session.active().map(|state| (state.uid, state.revision));
-                if target.is_none() || target != dialog.save || Self::unfinished(app) || self.suspended() {
+        let outcome = field(packet, "outcome", 16);
+        let current = app.session.active().map(|state| (state.uid, state.revision));
+        match (outcome.as_deref(), dialog.action) {
+            (Some("failed"), _) => Err(field(packet, "message", 250).unwrap_or_else(|| "The WebOS document dialog failed.".into())),
+            (Some("destination"), DialogAction::Save { document, revision }) => {
+                if current != Some((document, revision)) || Self::unfinished(app) || self.suspended() {
                     return Err("The publication changed while choosing its save destination.".into());
                 }
                 let path = field(packet, "path", 2048).ok_or("Invalid DesignCraft destination.")?;
                 self.send_save(app, path, "save", json!({}))
+            }
+            (Some("asset"), DialogAction::Relink { document, revision, asset }) => {
+                if current != Some((document, revision)) || Self::unfinished(app) || self.suspended() {
+                    return Err("The publication changed while choosing its graphic.".into());
+                }
+                let name = field(packet, "name", 255).ok_or("Invalid account graphic filename.")?;
+                let bytes = get(packet, "bytes").dyn_into::<ArrayBuffer>().map_err(|_| "Invalid account graphic data.")?;
+                if bytes.byte_length() == 0 || bytes.byte_length() > MAX_PROJECT_BYTES {
+                    return Err("Invalid account graphic size.".into());
+                }
+                app.session.embed_account_graphic(asset, &name, Uint8Array::new(&bytes).to_vec()).map_err(|error| error.to_string())?;
+                app.after_engine();
+                app.status(format!("Embedded {name} in the publication."));
+                Ok(())
             }
             _ => Ok(()),
         }

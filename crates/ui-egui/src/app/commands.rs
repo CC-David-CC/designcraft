@@ -12,6 +12,7 @@ impl DesignApp {
                 "app.save" | "file.save" => Some(AccountDocumentRequest::Save),
                 "app.saveDialog" | "file.saveAs" => Some(AccountDocumentRequest::SaveAs),
                 "file.close" | "app.quit" => Some(AccountDocumentRequest::Close),
+                "links.relink" => params.get("asset").and_then(Value::as_u64).map(AccountDocumentRequest::RelinkGraphic),
                 "file.openBytes" | "file.openIdml" | "file.openRecent" | "file.revert" | "data.merge" | "window.newWindow" => {
                     let error = "This operation requires a separate account publication view.".to_string();
                     self.status(error.clone());

@@ -6,6 +6,7 @@ pub enum AccountDocumentRequest {
     Save,
     SaveAs,
     Close,
+    RelinkGraphic(u64),
 }
 
 pub type AccountDocumentFn = Box<dyn FnMut(AccountDocumentRequest) -> Result<(), String>>;
