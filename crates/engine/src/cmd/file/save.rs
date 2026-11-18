@@ -22,11 +22,7 @@ impl Session {
     /// Serialize the current native document without rebasing linked assets against a local
     /// filesystem path. The account host grants the destination and persists these bytes.
     pub fn prepare_account_save(&self, path: &str) -> Result<(PreparedAccountSave, Vec<u8>)> {
-        if path.len() > 2048
-            || !path.rsplit_once('.').is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("designcraft"))
-            || path.chars().any(|character| character == '\\' || character.is_control())
-            || path.split('/').any(|part| matches!(part, "" | "." | ".."))
-        {
+        if super::account_file_name(path).is_none() {
             return Err(bad("file.save", "choose an account-relative .designcraft path"));
         }
         let state = self.doc()?;

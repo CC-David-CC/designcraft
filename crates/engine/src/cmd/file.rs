@@ -26,6 +26,17 @@ pub use registry::specs;
 pub use save::PreparedAccountSave;
 pub(crate) use snippets::{snippet_bytes, snippet_place};
 
+fn account_file_name(path: &str) -> Option<&str> {
+    let name = path.rsplit('/').next()?;
+    let (stem, extension) = name.rsplit_once('.')?;
+    (!stem.is_empty()
+        && extension.eq_ignore_ascii_case("designcraft")
+        && path.len() <= 2048
+        && !path.chars().any(|character| character == '\\' || character.is_control())
+        && !path.split('/').any(|part| matches!(part, "" | "." | "..")))
+    .then_some(name)
+}
+
 #[cfg(test)]
 thread_local! {
     /// Makes [`to_bytes`] fail on this thread, standing in for writer errors that need gigabytes to reach.

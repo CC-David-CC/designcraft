@@ -161,6 +161,27 @@ fn document_fonts_folder(dir: &std::path::Path) -> std::path::PathBuf {
         .map_or(exact, |e| e.path())
 }
 
+impl Session {
+    /// Open a native publication verified by the account host in a new editor session.
+    pub fn open_account_document(&mut self, path: &str, bytes: &[u8]) -> Result<Vec<String>> {
+        let name = super::account_file_name(path).ok_or_else(|| bad("file.open", "choose an account-relative .designcraft path"))?;
+        if !self.documents().is_empty() {
+            return Err(bad("file.open", "open the account publication in a fresh editor"));
+        }
+        if bytes.len() as u64 > crate::io::MAX_FILE_BYTES {
+            return Err(bad("file.open", "account publication exceeds the native file size limit"));
+        }
+        let (mut document, mut warnings) = load_bytes(bytes)?;
+        let linked = document.assets.values().filter(|asset| asset.storage == designcraft_doc::Storage::Linked).count();
+        if linked > 0 {
+            warnings.push(format!("{linked} linked assets need their originals from account storage"));
+        }
+        document.title = without_native_extension(name).to_owned();
+        self.add_document(DocState::new(document, Some(path.to_owned())));
+        Ok(warnings)
+    }
+}
+
 pub(super) fn file_open_bytes(s: &mut Session, p: &Value) -> Result<Value> {
     let b = base64_decode(str_param(p, "base64").unwrap_or(""));
     // IDML packages are recognised by their stored `mimetype` first entry, INDD files by their
@@ -553,6 +574,25 @@ mod open_bytes_tests {
                 assert_eq!(s.doc().unwrap().doc.title, "Brochure", "{command}: {name}");
             }
         }
+    }
+
+    #[test]
+    fn account_open_checks_the_path_and_keeps_one_publication_per_session() {
+        let mut author = Session::new();
+        new_document(&mut author, "Inter", "Account publication");
+        let (_, bytes) = author.prepare_account_save("Documents/Publication.designcraft").unwrap();
+        let mut restored = Session::new();
+        assert!(restored.open_account_document("../Publication.designcraft", &bytes).is_err());
+        assert!(restored.open_account_document("Documents/Publication.designcraft", b"invalid").is_err());
+        assert!(restored.documents().is_empty());
+        restored.open_account_document("Documents/Publication.designcraft", &bytes).unwrap();
+        assert!(restored.open_account_document("Documents/Other.designcraft", &bytes).is_err());
+        let document = restored.doc().unwrap();
+        assert_eq!(restored.documents().len(), 1);
+        assert_eq!(document.path.as_deref(), Some("Documents/Publication.designcraft"));
+        assert_eq!(document.doc.title, "Publication");
+        assert!(!document.is_dirty());
+        assert!(document.doc.stories.values().any(|story| story.text == "Account publication"));
     }
 
     /// A `.designcraft` file opened from bytes under its file name (a browser or host passes the
